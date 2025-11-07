@@ -1,5 +1,4 @@
-#  Python iOS Rescue Tools — Contacts Ready, Messages Next.
-
+#  Python iOS Rescue Tools — Contacts Ready
 > **“Extract. Decode. Recover.”**  
 > A modular Python toolkit for ethical iOS data recovery (opensource and clean - we get em all, no hidden $50 fees here) — built for investigators, technicians, and curious minds who don’t accept “unrecoverable.”
 > Not built for those intending on breaking the law, invading privacy - or just general anti-social creep behavior. We check for that.
@@ -158,4 +157,5 @@ Here’s what’s planned (and realistically achievable):
 ## 🩶 License
 
 MIT — because data recovery shouldn’t be proprietary, nor should it cost so much/  Except for those hardware guys swapping platters in 3.5" HDD - you dudes are legends!
+
 
