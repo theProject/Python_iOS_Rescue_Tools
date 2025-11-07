@@ -7,7 +7,7 @@
 
 ## 🚀 Overview
 
-**Python iOS Rescue Tools** is as close to a forensic-grade recovery framework for iOS data, written in Python by Tristan@therProject. - inspired by a good friend who truly needed help, we solved a problem.
+**Python iOS Rescue Tools** is as close to a forensic-grade recovery framework for iOS data, written in Python for justice against burnware out there that gives you 3 comtacts free, and ransoms the rest.  Inspired by a good friend who truly needed help, we solved a problem for him - and sharing for all.
 It can analyze, decode, and export artifacts from iTunes/iOS backups or direct file extractions, producing clean, structured outputs for auditing, reporting, or digital-forensics workflows. 
 
 Developed by **theProject.** — where **code meets craft.**
@@ -157,5 +157,6 @@ Here’s what’s planned (and realistically achievable):
 ## 🩶 License
 
 MIT — because data recovery shouldn’t be proprietary, nor should it cost so much/  Except for those hardware guys swapping platters in 3.5" HDD - you dudes are legends!
+
 
 
