@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env python3
-# extract_ios_contacts.py
+# extract_ios_contacts.py (theProject. OpenSource)
 # Extract contacts from an UNENCRYPTED iTunes/iOS backup directory (Windows/macOS).
 # Outputs CSV and/or VCF. No external deps; uses sqlite3 only.
 
@@ -8,7 +8,7 @@ import csv
 import os
 import sqlite3
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 def error(msg: str):
     print(f"[!] {msg}", file=sys.stderr)
@@ -34,12 +34,11 @@ def backup_file_path(backup_dir: str, file_id: str) -> str:
 
 def find_contact_dbs(manifest_conn: sqlite3.Connection) -> List[sqlite3.Row]:
     # Look for likely Contacts DB paths across iOS versions
-    # We query Files table (domain, relativePath, fileID)
     like_patterns = [
         "%AddressBook.sqlitedb%",
         "%AddressBookImages.sqlitedb%",
-        "%Application Support/AddressBook/%",  # newer layout
-        "%Contacts%.sqlite%",                  # catch-all
+        "%Application Support/AddressBook/%",
+        "%Contacts%.sqlite%",
     ]
     rows: List[sqlite3.Row] = []
     for pat in like_patterns:
@@ -48,13 +47,11 @@ def find_contact_dbs(manifest_conn: sqlite3.Connection) -> List[sqlite3.Row]:
             FROM Files
             WHERE relativePath LIKE ?
         """, (pat,)).fetchall()
-    # Deduplicate by fileID, keep unique list
-    seen = set()
-    unique = []
+    # Deduplicate by fileID
+    seen = set(); unique = []
     for r in rows:
         if r["fileID"] not in seen:
-            unique.append(r)
-            seen.add(r["fileID"])
+            unique.append(r); seen.add(r["fileID"])
     return unique
 
 def table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -63,12 +60,12 @@ def table_exists(conn: sqlite3.Connection, name: str) -> bool:
     ).fetchone()
     return row is not None
 
+# ---------- Legacy AddressBook schema (ABPerson / ABMultiValue) ----------
 def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
-    """
-    Legacy AddressBook schema (ABPerson / ABMultiValue).
-    """
     info("Detected legacy AB schema")
     contacts = []
+
+    # Read people
     try:
         persons = conn.execute("""
             SELECT ROWID as id, First, Last, Middle, Organization, Note
@@ -80,6 +77,22 @@ def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
             FROM abperson
         """).fetchall()
 
+    # Build label map if ABMultiValueLabel exists (maps ROWID -> label text)
+    label_map: Dict[int, str] = {}
+    if table_exists(conn, "ABMultiValueLabel"):
+        try:
+            # Some variants: columns may be (ROWID,label) or (ROWID, value)
+            rows = conn.execute("PRAGMA table_info(ABMultiValueLabel)").fetchall()
+            cols = {r["name"].lower() for r in rows}
+            label_col = "label" if "label" in cols else ("value" if "value" in cols else None)
+            if label_col:
+                for r in conn.execute(f"SELECT ROWID as id, {label_col} as txt FROM ABMultiValueLabel"):
+                    if r["id"] is not None and r["txt"] is not None:
+                        label_map[int(r["id"])] = str(r["txt"])
+        except sqlite3.DatabaseError:
+            pass
+
+    # ABMultiValue holds values; label may be TEXT or an INT foreign key
     mv_rows = conn.execute("""
         SELECT record_id, property, value, label
         FROM ABMultiValue
@@ -91,19 +104,29 @@ def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
     addresses = defaultdict(list)
     urls = defaultdict(list)
 
-    def norm_label(lbl: Optional[str]) -> str:
-        if not lbl:
+    def norm_label(raw) -> str:
+        if raw is None:
             return ""
-        return lbl.strip().lower()
+        # If it's an int, try to resolve via label_map; else cast to string
+        try:
+            if isinstance(raw, int):
+                return label_map.get(raw, str(raw)).strip().lower()
+            s = str(raw)
+            return s.strip().lower()
+        except Exception:
+            return ""
 
     for r in mv_rows:
         rid = r["record_id"]
         val = r["value"]
+        if val is None:
+            continue  # nothing to record
         label = norm_label(r["label"])
         prop = r["property"]
 
-        is_phone = ("phone" in label) or ("mobile" in label) or ("cell" in label) or prop == 3 or prop == 7
-        is_email = ("email" in label) or ("e-mail" in label) or prop == 4 or prop == 1
+        # Heuristic mapping: use labels + property + value shape
+        is_phone = ("phone" in label) or ("mobile" in label) or ("cell" in label) or prop in (3, 7)
+        is_email = ("email" in label) or ("e-mail" in label) or prop in (1, 4)
         is_addr  = ("address" in label) or prop == 6
         is_url   = ("url" in label) or ("homepage" in label)
 
@@ -111,17 +134,21 @@ def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
             if isinstance(val, str):
                 if "@" in val:
                     is_email = True
-                elif any(ch.isdigit() for ch in val) and len(val) >= 7:
+                elif any(ch.isdigit() for ch in val) and sum(ch.isdigit() for ch in val) >= 7:
                     is_phone = True
 
+        sval = str(val).strip()
+        if not sval:
+            continue
+
         if is_phone:
-            phones[rid].append(val)
+            phones[rid].append(sval)
         elif is_email:
-            emails[rid].append(val)
+            emails[rid].append(sval)
         elif is_addr:
-            addresses[rid].append(val)
+            addresses[rid].append(sval)
         elif is_url:
-            urls[rid].append(val)
+            urls[rid].append(sval)
 
     for p in persons:
         contacts.append({
@@ -139,18 +166,12 @@ def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
 
     return contacts
 
+# ---------- Newer Core Data Z* schema ----------
 def load_contacts_from_coredata_schema(conn: sqlite3.Connection) -> List[Dict]:
-    """
-    Newer Core Data-backed schema (tables like ZABCDRECORD, ZABCDPHONENUMBER, ZABCDEMAILADDRESS).
-    """
     info("Detected Core Data Z* schema")
 
     candidate_person_tables = ["ZABCDRECORD", "ZCONTACT", "ZPERSON", "ZABPERSON"]
-    person_table = None
-    for t in candidate_person_tables:
-        if table_exists(conn, t):
-            person_table = t
-            break
+    person_table = next((t for t in candidate_person_tables if table_exists(conn, t)), None)
     if not person_table:
         raise RuntimeError("Could not find person table in Core Data schema")
 
@@ -161,54 +182,50 @@ def load_contacts_from_coredata_schema(conn: sqlite3.Connection) -> List[Dict]:
                 return c
         return None
 
-    col_first = pick_col(["ZFIRSTNAME", "ZFIRST", "ZFIRST_NAME"])
-    col_last  = pick_col(["ZLASTNAME", "ZLAST", "ZLAST_NAME"])
-    col_middle = pick_col(["ZMIDDLENAME", "ZMN", "ZMIDDLE"])
-    col_org   = pick_col(["ZORGANIZATION", "ZORGANIZATIONNAME", "ZCOMPANY"])
-    col_note  = pick_col(["ZNOTE"])
+    col_first  = pick_col(["ZFIRSTNAME", "ZFIRST", "ZFIRST_NAME"])
+    col_last   = pick_col(["ZLASTNAME", "ZLAST", "ZLAST_NAME"])
+    col_mid    = pick_col(["ZMIDDLENAME", "ZMN", "ZMIDDLE"])
+    col_org    = pick_col(["ZORGANIZATION", "ZORGANIZATIONNAME", "ZCOMPANY"])
+    col_note   = pick_col(["ZNOTE"])
+    col_del    = pick_col(["ZISDELETED", "ZTRASHED", "ZMARKEDFORDELETE"])
 
-    col_deleted = pick_col(["ZISDELETED", "ZTRASHED", "ZMARKEDFORDELETE"])
+    base = f"SELECT Z_PK as id"
+    base += f", {col_first} as first"  if col_first else ", '' as first"
+    base += f", {col_last} as last"    if col_last  else ", '' as last"
+    base += f", {col_mid} as middle"   if col_mid   else ", '' as middle"
+    base += f", {col_org} as org"      if col_org   else ", '' as org"
+    base += f", {col_note} as note"    if col_note  else ", '' as note"
+    base += f", {col_del} as is_deleted" if col_del else ", 0 as is_deleted"
+    base += f" FROM {person_table}"
 
-    base_query = f"SELECT Z_PK as id"
-    for (alias, col) in [("first", col_first), ("last", col_last), ("middle", col_middle), ("org", col_org), ("note", col_note)]:
-        if col:
-            base_query += f", {col} as {alias}"
-        else:
-            base_query += f", '' as {alias}"
-    if col_deleted:
-        base_query += f", {col_deleted} as is_deleted"
-    else:
-        base_query += ", 0 as is_deleted"
-    base_query += f" FROM {person_table}"
-
-    persons = conn.execute(base_query).fetchall()
+    persons = conn.execute(base).fetchall()
 
     map_defs = [
-        ("phones", ["ZABCDPHONENUMBER", "ZPHONE", "ZABPHONE"], ["ZOWNER", "ZCONTACT", "ZPERSON"], ["ZFULLNUMBER", "ZVALUE", "ZPHONENUMBER"]),
-        ("emails", ["ZABCDEMAILADDRESS", "ZEMAIL", "ZABEMAIL"], ["ZOWNER", "ZCONTACT", "ZPERSON"], ["ZADDRESS", "ZVALUE", "ZEMAIL"]),
-        ("addresses", ["ZABCDPOSTALADDRESS", "ZPOSTALADDRESS", "ZADDRESS"], ["ZOWNER", "ZCONTACT", "ZPERSON"], ["ZSTREET", "ZVALUE", "ZFULLADDRESS"]),
-        ("urls", ["ZABCDURLADDRESS", "ZURLADDRESS", "ZURL"], ["ZOWNER", "ZCONTACT", "ZPERSON"], ["ZURL", "ZVALUE"]),
+        ("phones",   ["ZABCDPHONENUMBER", "ZPHONE", "ZABPHONE"], ["ZOWNER", "ZCONTACT", "ZPERSON"], ["ZFULLNUMBER", "ZVALUE", "ZPHONENUMBER"]),
+        ("emails",   ["ZABCDEMAILADDRESS", "ZEMAIL", "ZABEMAIL"], ["ZOWNER", "ZCONTACT", "ZPERSON"], ["ZADDRESS", "ZVALUE", "ZEMAIL"]),
+        ("addresses",["ZABCDPOSTALADDRESS","ZPOSTALADDRESS","ZADDRESS"], ["ZOWNER", "ZCONTACT", "ZPERSON"], ["ZSTREET", "ZVALUE", "ZFULLADDRESS"]),
+        ("urls",     ["ZABCDURLADDRESS","ZURLADDRESS","ZURL"], ["ZOWNER", "ZCONTACT", "ZPERSON"], ["ZURL", "ZVALUE"]),
     ]
 
     from collections import defaultdict
     child_maps: Dict[str, Dict[int, List[str]]] = {k: defaultdict(list) for k, *_ in map_defs}
 
-    def locate_child_table(tbl_candidates, owner_candidates, value_candidates):
-        for t in tbl_candidates:
+    def locate_child(tbls, owners, values):
+        for t in tbls:
             if table_exists(conn, t):
                 cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({t})")}
-                owner_col = next((c for c in owner_candidates if c in cols), None)
-                value_col = next((c for c in value_candidates if c in cols), None)
-                return t, owner_col, value_col
+                o = next((c for c in owners if c in cols), None)
+                v = next((c for c in values if c in cols), None)
+                if o and v:
+                    return t, o, v
         return None, None, None
 
     for key, tbls, owners, values in map_defs:
-        t, o, v = locate_child_table(tbls, owners, values)
+        t, o, v = locate_child(tbls, owners, values)
         if t and o and v:
             for r in conn.execute(f"SELECT {o} as owner, {v} as value FROM {t}"):
-                val = r["value"]
-                if val:
-                    child_maps[key][r["owner"]].append(str(val))
+                if r["value"] is not None:
+                    child_maps[key][r["owner"]].append(str(r["value"]))
         else:
             info(f"[warn] Could not find child table for {key}; skipping")
 
@@ -290,6 +307,7 @@ def pick_best_contacts_db(backup_dir: str, manifest_conn: sqlite3.Connection) ->
     if not candidates:
         return None
 
+    # Prefer AddressBook/Contacts DB over images or auxiliary files
     priorities = []
     for r in candidates:
         rp = (r["relativePath"] or "").lower()
@@ -327,8 +345,7 @@ def main():
     try:
         manifest_path = find_manifest_db(backup_dir)
     except FileNotFoundError as e:
-        error(str(e))
-        sys.exit(1)
+        error(str(e)); sys.exit(1)
 
     conn = open_sqlite(manifest_path)
     try:
