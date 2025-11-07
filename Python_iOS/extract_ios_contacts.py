@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env python3
-# extract_ios_contacts.py (theProject. OpenSource)
+# extract_ios_contacts.py (updated/hardened)
 # Extract contacts from an UNENCRYPTED iTunes/iOS backup directory (Windows/macOS).
 # Outputs CSV and/or VCF. No external deps; uses sqlite3 only.
 
@@ -28,12 +28,10 @@ def open_sqlite(path: str) -> sqlite3.Connection:
     return conn
 
 def backup_file_path(backup_dir: str, file_id: str) -> str:
-    # Files are stored as <backup_dir>/<first 2 chars>/<fileID>
     subdir = file_id[:2]
     return os.path.join(backup_dir, subdir, file_id)
 
 def find_contact_dbs(manifest_conn: sqlite3.Connection) -> List[sqlite3.Row]:
-    # Look for likely Contacts DB paths across iOS versions
     like_patterns = [
         "%AddressBook.sqlitedb%",
         "%AddressBookImages.sqlitedb%",
@@ -47,7 +45,6 @@ def find_contact_dbs(manifest_conn: sqlite3.Connection) -> List[sqlite3.Row]:
             FROM Files
             WHERE relativePath LIKE ?
         """, (pat,)).fetchall()
-    # Deduplicate by fileID
     seen = set(); unique = []
     for r in rows:
         if r["fileID"] not in seen:
@@ -60,12 +57,11 @@ def table_exists(conn: sqlite3.Connection, name: str) -> bool:
     ).fetchone()
     return row is not None
 
-# ---------- Legacy AddressBook schema (ABPerson / ABMultiValue) ----------
+# ---------- Legacy AddressBook schema ----------
 def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
     info("Detected legacy AB schema")
     contacts = []
 
-    # Read people
     try:
         persons = conn.execute("""
             SELECT ROWID as id, First, Last, Middle, Organization, Note
@@ -77,13 +73,11 @@ def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
             FROM abperson
         """).fetchall()
 
-    # Build label map if ABMultiValueLabel exists (maps ROWID -> label text)
+    # ABMultiValueLabel: map numeric label ids -> text
     label_map: Dict[int, str] = {}
     if table_exists(conn, "ABMultiValueLabel"):
         try:
-            # Some variants: columns may be (ROWID,label) or (ROWID, value)
-            rows = conn.execute("PRAGMA table_info(ABMultiValueLabel)").fetchall()
-            cols = {r["name"].lower() for r in rows}
+            cols = {r["name"].lower() for r in conn.execute("PRAGMA table_info(ABMultiValueLabel)")}
             label_col = "label" if "label" in cols else ("value" if "value" in cols else None)
             if label_col:
                 for r in conn.execute(f"SELECT ROWID as id, {label_col} as txt FROM ABMultiValueLabel"):
@@ -92,7 +86,6 @@ def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
         except sqlite3.DatabaseError:
             pass
 
-    # ABMultiValue holds values; label may be TEXT or an INT foreign key
     mv_rows = conn.execute("""
         SELECT record_id, property, value, label
         FROM ABMultiValue
@@ -107,7 +100,6 @@ def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
     def norm_label(raw) -> str:
         if raw is None:
             return ""
-        # If it's an int, try to resolve via label_map; else cast to string
         try:
             if isinstance(raw, int):
                 return label_map.get(raw, str(raw)).strip().lower()
@@ -120,11 +112,10 @@ def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
         rid = r["record_id"]
         val = r["value"]
         if val is None:
-            continue  # nothing to record
+            continue
         label = norm_label(r["label"])
         prop = r["property"]
 
-        # Heuristic mapping: use labels + property + value shape
         is_phone = ("phone" in label) or ("mobile" in label) or ("cell" in label) or prop in (3, 7)
         is_email = ("email" in label) or ("e-mail" in label) or prop in (1, 4)
         is_addr  = ("address" in label) or prop == 6
@@ -134,7 +125,7 @@ def load_contacts_from_ab_schema(conn: sqlite3.Connection) -> List[Dict]:
             if isinstance(val, str):
                 if "@" in val:
                     is_email = True
-                elif any(ch.isdigit() for ch in val) and sum(ch.isdigit() for ch in val) >= 7:
+                elif sum(ch.isdigit() for ch in val) >= 7:
                     is_phone = True
 
         sval = str(val).strip()
@@ -306,8 +297,6 @@ def pick_best_contacts_db(backup_dir: str, manifest_conn: sqlite3.Connection) ->
     candidates = find_contact_dbs(manifest_conn)
     if not candidates:
         return None
-
-    # Prefer AddressBook/Contacts DB over images or auxiliary files
     priorities = []
     for r in candidates:
         rp = (r["relativePath"] or "").lower()
@@ -320,7 +309,6 @@ def pick_best_contacts_db(backup_dir: str, manifest_conn: sqlite3.Connection) ->
             score += 5
         score += rp.count("/")
         priorities.append((score, r))
-
     priorities.sort(key=lambda x: x[0], reverse=True)
     best = priorities[0][1]
     db_path = backup_file_path(backup_dir, best["fileID"])
