@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env python3
-# extract_ios_contacts.py (updated/hardened)
+# extract_ios_contacts.py (PRT edition)
 # Extract contacts from an UNENCRYPTED iTunes/iOS backup directory (Windows/macOS).
 # Outputs CSV and/or VCF. No external deps; uses sqlite3 only.
 
@@ -10,12 +10,40 @@ import sqlite3
 import sys
 from typing import Dict, List, Optional
 
+# -------------------- cute colors --------------------
+RESET = "\x1b[0m"
+MAGENTA = "\x1b[95m"   # bright magenta (closest to #e20074 in ANSI)
+TEAL = "\x1b[96m"      # bright cyan ≈ teal
+BOLD = "\x1b[1m"
+
+def _enable_ansi_on_windows():
+    # Try to enable ANSI on older Windows consoles; harmless elsewhere
+    if os.name != "nt":
+        return
+    try:
+        import msvcrt  # noqa: F401
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
+def _color(s, c):
+    # Respect NO_COLOR or non-tty
+    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        return s
+    return f"{c}{s}{RESET}"
+
 def error(msg: str):
     print(f"[!] {msg}", file=sys.stderr)
 
 def info(msg: str):
     print(f"[*] {msg}")
 
+# -------------------- core helpers --------------------
 def find_manifest_db(backup_dir: str) -> str:
     candidate = os.path.join(backup_dir, "Manifest.db")
     if not os.path.isfile(candidate):
@@ -28,10 +56,12 @@ def open_sqlite(path: str) -> sqlite3.Connection:
     return conn
 
 def backup_file_path(backup_dir: str, file_id: str) -> str:
+    # Files are stored as <backup_dir>/<first 2 chars>/<fileID>
     subdir = file_id[:2]
     return os.path.join(backup_dir, subdir, file_id)
 
 def find_contact_dbs(manifest_conn: sqlite3.Connection) -> List[sqlite3.Row]:
+    # Look for likely Contacts DB paths across iOS versions
     like_patterns = [
         "%AddressBook.sqlitedb%",
         "%AddressBookImages.sqlitedb%",
@@ -45,6 +75,7 @@ def find_contact_dbs(manifest_conn: sqlite3.Connection) -> List[sqlite3.Row]:
             FROM Files
             WHERE relativePath LIKE ?
         """, (pat,)).fetchall()
+    # Deduplicate by fileID
     seen = set(); unique = []
     for r in rows:
         if r["fileID"] not in seen:
@@ -249,8 +280,12 @@ def read_contacts_from_db(db_path: str) -> List[Dict]:
     finally:
         conn.close()
 
+# -------------------- outputs --------------------
 def export_csv(contacts: List[Dict], path: str):
     info(f"Writing CSV: {path}")
+    folder = os.path.dirname(os.path.abspath(path))
+    if folder and not os.path.exists(folder):
+        os.makedirs(folder, exist_ok=True)
     cols = ["first", "middle", "last", "org", "phones", "emails", "addresses", "urls", "note"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=cols)
@@ -266,6 +301,9 @@ def vcard_escape(s: str) -> str:
 
 def export_vcf(contacts: List[Dict], path: str):
     info(f"Writing VCF: {path}")
+    folder = os.path.dirname(os.path.abspath(path))
+    if folder and not os.path.exists(folder):
+        os.makedirs(folder, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         for c in contacts:
             first = vcard_escape(c.get("first",""))
@@ -273,7 +311,6 @@ def export_vcf(contacts: List[Dict], path: str):
             middle = vcard_escape(c.get("middle",""))
             org   = vcard_escape(c.get("org",""))
             note  = vcard_escape(c.get("note",""))
-
             fn = " ".join([x for x in [first, middle, last] if x]).strip()
             f.write("BEGIN:VCARD\n")
             f.write("VERSION:3.0\n")
@@ -293,10 +330,13 @@ def export_vcf(contacts: List[Dict], path: str):
                 f.write(f"ITEM1.ADR;TYPE=HOME:;;;;;;{vcard_escape(a)}\n")
             f.write("END:VCARD\n")
 
+# -------------------- manifest pick & CLI --------------------
 def pick_best_contacts_db(backup_dir: str, manifest_conn: sqlite3.Connection) -> Optional[str]:
     candidates = find_contact_dbs(manifest_conn)
     if not candidates:
         return None
+
+    # Prefer AddressBook/Contacts DB over images or auxiliary files
     priorities = []
     for r in candidates:
         rp = (r["relativePath"] or "").lower()
@@ -309,6 +349,7 @@ def pick_best_contacts_db(backup_dir: str, manifest_conn: sqlite3.Connection) ->
             score += 5
         score += rp.count("/")
         priorities.append((score, r))
+
     priorities.sort(key=lambda x: x[0], reverse=True)
     best = priorities[0][1]
     db_path = backup_file_path(backup_dir, best["fileID"])
@@ -319,15 +360,21 @@ def pick_best_contacts_db(backup_dir: str, manifest_conn: sqlite3.Connection) ->
     return db_path
 
 def main():
+    _enable_ansi_on_windows()
+
     ap = argparse.ArgumentParser(description="Extract iOS contacts from an UNENCRYPTED backup directory.")
     ap.add_argument("--backup-dir", required=True, help="Path to iTunes/iOS backup directory (contains Manifest.db)")
     ap.add_argument("--csv", help="Path to write CSV (e.g., contacts.csv)")
     ap.add_argument("--vcf", help="Path to write VCF (e.g., contacts.vcf)")
     args = ap.parse_args()
 
-    if not args.csv and not args.vcf:
-        error("Specify at least one of --csv or --vcf")
-        sys.exit(2)
+    # Default outputs: Documents\PRT-Contacts\contacts.csv/.vcf
+    user_docs = os.path.join(os.path.expanduser("~"), "Documents")
+    outdir = os.path.join(user_docs, "PRT-Contacts")
+    if not args.csv:
+        args.csv = os.path.join(outdir, "contacts.csv")
+    if not args.vcf:
+        args.vcf = os.path.join(outdir, "contacts.vcf")
 
     backup_dir = os.path.abspath(args.backup_dir)
     try:
@@ -348,12 +395,21 @@ def main():
     contacts = read_contacts_from_db(db_path)
     info(f"Found {len(contacts)} contacts")
 
-    if args.csv:
-        export_csv(contacts, args.csv)
-    if args.vcf:
-        export_vcf(contacts, args.vcf)
+    # Ensure output directory exists and write files
+    export_csv(contacts, args.csv)
+    export_vcf(contacts, args.vcf)
 
-    info("Done.")
+    # Fun, colorful outro
+    pet = _color("Python", TEAL)
+    brand = _color("theProject.", MAGENTA + BOLD)
+    count = _color(str(len(contacts)), TEAL + BOLD)
+    path_colored = _color(outdir, MAGENTA)
+
+    print()
+    print(f"{brand} has a pet called {pet}, and it had its way with your backup…")
+    print(f"…and recovered {count} of your long-lost contacts. Breathe easy. 🫶")
+    print(f"Your files are waiting in: {path_colored}")
+    print()
 
 if __name__ == "__main__":
     main()
