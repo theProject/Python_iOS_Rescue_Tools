@@ -1,0 +1,10 @@
+# Core
+rich>=13.7.0
+tqdm>=4.66.0
+pandas>=2.2.0
+# Media / EXIF (optional but recommended)
+Pillow>=10.0.0
+exifread>=3.0.0
+# SQLite helper (stdlib covers most, but some systems need this)
+# pysqlite3-binary; platform dependent, uncomment if needed
+# pysqlite3-binary>=0.5.3
