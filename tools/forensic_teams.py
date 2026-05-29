@@ -24,6 +24,8 @@ from tools.forensic_reports import write_cards_html, write_csv, write_json, writ
 TEAMS_DOMAIN_RE = re.compile(r"(microsoft|teams|skype|office|msteams)", re.I)
 TEAMS_PATH_RE = re.compile(r"(chat|message|conversation|thread|cache|database|sqlite|realm|storage|log|leveldb|indexeddb|offline)", re.I)
 TEAMS_EXTS = {".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm", ".sqlite-wal", ".sqlite-shm", ".json", ".plist", ".txt", ".log", ".realm", ".ldb", ".sst", ".xml"}
+SQLITE_WAL_EXTS = {".db-wal", ".sqlite-wal"}
+SQLITE_SHM_EXTS = {".db-shm", ".sqlite-shm"}
 
 
 def is_teams_candidate(record: ManifestRecord) -> bool:
@@ -44,7 +46,30 @@ def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def inspect_sqlite_keywords(path: Path, keywords: list[str], row_limit: int, sample_dir: Path, source: ManifestRecord, parser_note: str = "") -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[DeepKeywordHit]]:
+def sqlite_sidecar_type(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix in SQLITE_WAL_EXTS:
+        return "sqlite_wal"
+    if suffix in SQLITE_SHM_EXTS:
+        return "sqlite_shm"
+    return None
+
+
+def _select_rows(conn: sqlite3.Connection, sql_base: str, row_limit: int) -> sqlite3.Cursor:
+    if row_limit <= 0:
+        return conn.execute(sql_base)
+    return conn.execute(f"{sql_base} LIMIT ?", (row_limit,))
+
+
+def inspect_sqlite_keywords(
+    path: Path,
+    keywords: list[str],
+    row_limit: int,
+    sample_dir: Path,
+    source: ManifestRecord,
+    parser_note: str = "",
+    context: int = 120,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[DeepKeywordHit]]:
     tables_report: list[dict[str, Any]] = []
     samples: list[dict[str, Any]] = []
     hits: list[DeepKeywordHit] = []
@@ -60,7 +85,8 @@ def inspect_sqlite_keywords(path: Path, keywords: list[str], row_limit: int, sam
             text_cols = [c["name"] for c in cols if str(c.get("type") or "").upper() in {"TEXT", "VARCHAR", "CHAR", "CLOB"} or "text" in c["name"].lower()]
             tables_report.append({"database": str(path), "table": table, "row_count": count, "columns_json": json.dumps(cols), "text_columns": ",".join(text_cols)})
             try:
-                rows = [dict(r) for r in conn.execute(f"SELECT * FROM {_quote_ident(table)} LIMIT ?", (min(row_limit, 25),))]
+                sample_limit = min(row_limit, 25) if row_limit > 0 else 25
+                rows = [dict(r) for r in conn.execute(f"SELECT * FROM {_quote_ident(table)} LIMIT ?", (sample_limit,))]
                 if rows:
                     sample_path = sample_dir / f"{path.stem}_{table}.json"
                     write_json(sample_path, rows)
@@ -69,12 +95,12 @@ def inspect_sqlite_keywords(path: Path, keywords: list[str], row_limit: int, sam
                 continue
             for column in text_cols:
                 try:
-                    sql = f"SELECT rowid AS _rowid, {_quote_ident(column)} AS value FROM {_quote_ident(table)} LIMIT ?"
-                    for row in conn.execute(sql, (row_limit,)):
+                    sql = f"SELECT rowid AS _rowid, {_quote_ident(column)} AS value FROM {_quote_ident(table)}"
+                    for row in _select_rows(conn, sql, row_limit):
                         value = row["value"]
                         if value is None:
                             continue
-                        for keyword, offset, snippet in keyword_hits(str(value), keywords):
+                        for keyword, offset, snippet in keyword_hits(str(value), keywords, context=context):
                             hits.append(
                                 DeepKeywordHit(
                                     keyword=keyword,
@@ -102,10 +128,14 @@ def inspect_sqlite_keywords(path: Path, keywords: list[str], row_limit: int, sam
     return tables_report, samples, hits
 
 
-def scan_text_keywords(path: Path, record: ManifestRecord, keywords: list[str], limit_mb: int = 25, parser_note: str = "text") -> list[DeepKeywordHit]:
+def scan_text_keywords(path: Path, record: ManifestRecord, keywords: list[str], limit_mb: int = 25, parser_note: str = "text", context: int = 120) -> list[DeepKeywordHit]:
     max_bytes = limit_mb * 1024 * 1024
     raw = path.read_bytes()[:max_bytes]
     text = raw.decode("utf-8", errors="ignore")
+    sidecar = sqlite_sidecar_type(path)
+    if sidecar:
+        parser_note = f"{sidecar}_sidecar_not_text_scanned"
+        return []
     if path.suffix.lower() == ".json":
         try:
             json.loads(text)
@@ -122,7 +152,7 @@ def scan_text_keywords(path: Path, record: ManifestRecord, keywords: list[str], 
         parser_note = "mixed_binary_text"
     hits: list[DeepKeywordHit] = []
     digest = sha256_file(path)
-    for keyword, offset, snippet in keyword_hits(text, keywords):
+    for keyword, offset, snippet in keyword_hits(text, keywords, context=context):
         hits.append(
             DeepKeywordHit(
                 keyword=keyword,
@@ -166,7 +196,7 @@ def run_teams_triage(
     sqlite_db_count = 0
     for record in candidates:
         dest = safe_output_path(output / "extracted_files", record.domain, record.relative_path)
-        source_obj = extractor._source_object_path(record.file_id)
+        source_obj = extractor.source_object_path(record.file_id)
         size_mb = file_size_mb(source_obj) if source_obj and source_obj.exists() else None
         if size_mb is not None and size_mb > max_file_mb and not include_large:
             artifact = ExtractedArtifact("teams_candidate", record.file_id, record.domain, record.relative_path, record.logical_path, str(source_obj), str(dest), sha256_file(source_obj), None, 0, extractor.is_encrypted(), False, True, f"Skipped by --max-teams-file-mb ({max_file_mb})")
@@ -174,11 +204,16 @@ def run_teams_triage(
             continue
         artifact = extractor.extract_record(record, dest, "teams_candidate")
         artifacts.append(artifact)
-        candidate_rows.append({"file_id": record.file_id, "domain": record.domain, "relative_path": record.relative_path, "logical_path": record.logical_path, "extracted_path": str(dest), "extracted": artifact.extracted, "skip_reason": artifact.skip_reason})
+        sidecar = sqlite_sidecar_type(dest)
+        if artifact.extracted and size_mb is None:
+            artifact.notes = "Pre-extraction source size was unknown; size policy could not be evaluated until after extraction."
+        candidate_rows.append({"file_id": record.file_id, "domain": record.domain, "relative_path": record.relative_path, "logical_path": record.logical_path, "extracted_path": str(dest), "extracted": artifact.extracted, "skip_reason": artifact.skip_reason, "artifact_type": sidecar or "candidate", "pre_extraction_size_mb": size_mb, "output_size": artifact.output_size, "notes": artifact.notes})
         if not artifact.extracted:
             warnings.append(f"Could not extract Teams candidate {record.logical_path}: {artifact.skip_reason}")
             continue
         try:
+            if sidecar:
+                continue
             if is_sqlite_file(dest):
                 sqlite_db_count += 1
                 tables, _, hits = inspect_sqlite_keywords(dest, keywords, sample_limit, sample_dir, record, "teams_sqlite")

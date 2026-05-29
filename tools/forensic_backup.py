@@ -42,8 +42,8 @@ def add_forensic_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--max-deep-file-mb", type=int, default=250)
     p.add_argument("--include-large-deep-files", action="store_true")
     p.add_argument("--deep-scan-text-limit-mb", type=int, default=25)
-    p.add_argument("--deep-scan-sqlite-row-limit", type=int, default=5000)
-    p.add_argument("--deep-scan-export-context", action="store_true")
+    p.add_argument("--deep-scan-sqlite-row-limit", type=int, default=0, help="Rows per SQLite text column to scan; 0 means no row limit")
+    p.add_argument("--deep-scan-export-context", type=int, default=240, help="Characters of context on each side of a deep-scan keyword hit")
     p.add_argument("--write-timeline", action="store_true")
 
 
@@ -112,7 +112,7 @@ class BackupExtractor:
             shutil.copy2(self.source / "Manifest.db", dest)
         return dest
 
-    def _source_object_path(self, file_id: str) -> Path | None:
+    def source_object_path(self, file_id: str) -> Path | None:
         for candidate in (self.source / file_id[:2] / file_id, self.source / file_id):
             if candidate.exists():
                 return candidate
@@ -120,7 +120,7 @@ class BackupExtractor:
 
     def extract_record(self, record: ManifestRecord, output_path: Path, label: str = "artifact") -> ExtractedArtifact:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        source_obj = self._source_object_path(record.file_id)
+        source_obj = self.source_object_path(record.file_id)
         source_hash = sha256_file(source_obj) if source_obj and source_obj.exists() else None
         try:
             if self.encrypted:
@@ -339,7 +339,18 @@ def run_forensic_triage(args: argparse.Namespace) -> TriageResult:
         log_lines.append("Found Teams candidates")
     if args.deep_app_cache_scan:
         deep_keywords = list(dict.fromkeys(DEFAULT_DEEP_KEYWORDS + args.deep_keyword))
-        deep_result = run_deep_scan(records, extractor, output, deep_keywords, args.max_deep_file_mb, args.include_large_deep_files, args.deep_scan_text_limit_mb, args.deep_scan_sqlite_row_limit, warnings)
+        deep_result = run_deep_scan(
+            records,
+            extractor,
+            output,
+            deep_keywords,
+            args.max_deep_file_mb,
+            args.include_large_deep_files,
+            args.deep_scan_text_limit_mb,
+            args.deep_scan_sqlite_row_limit,
+            args.deep_scan_export_context,
+            warnings,
+        )
         artifacts.extend(deep_result.pop("artifacts"))
         log_lines.append("Ran deep app cache scan")
     if args.write_timeline:
@@ -378,6 +389,8 @@ def run_forensic_triage(args: argparse.Namespace) -> TriageResult:
             "deep_scan_sqlite_databases_scanned": deep_result.get("sqlite_databases", 0),
             "deep_scan_text_files_scanned": deep_result.get("text_files", 0),
             "deep_scan_keyword_hits": deep_result.get("keyword_hits", 0),
+            "deep_scan_sqlite_row_limit": deep_result.get("sqlite_row_limit", args.deep_scan_sqlite_row_limit),
+            "deep_scan_export_context": deep_result.get("export_context", args.deep_scan_export_context),
         },
         "warnings": warnings,
         "notes": [

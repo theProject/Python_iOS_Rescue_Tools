@@ -7,7 +7,7 @@ from typing import Any
 from tools.forensic_common import file_size_mb, guess_app_from_record_domain, is_sqlite_file, safe_output_path, sha256_file
 from tools.forensic_models import ExtractedArtifact, ManifestRecord
 from tools.forensic_reports import write_cards_html, write_csv, write_json, write_table_html
-from tools.forensic_teams import inspect_sqlite_keywords, scan_text_keywords
+from tools.forensic_teams import inspect_sqlite_keywords, scan_text_keywords, sqlite_sidecar_type
 
 
 DEFAULT_DEEP_KEYWORDS = ["Tesla", "Julio", "Jake", "Monitor", "ADHD", "Bikrom"]
@@ -32,6 +32,7 @@ def run_deep_scan(
     include_large: bool,
     text_limit_mb: int,
     sqlite_row_limit: int,
+    export_context: int,
     warnings: list[str],
 ) -> dict[str, Any]:
     outdir = output / "deep_scan"
@@ -53,7 +54,7 @@ def run_deep_scan(
     for record in candidates:
         candidate_rows.append({"file_id": record.file_id, "domain": record.domain, "relative_path": record.relative_path, "logical_path": record.logical_path, "app_guess": guess_app_from_record_domain(record.domain)})
         dest = safe_output_path(extracted_dir, record.domain, record.relative_path)
-        source_obj = extractor._source_object_path(record.file_id)
+        source_obj = extractor.source_object_path(record.file_id)
         size_mb = file_size_mb(source_obj) if source_obj and source_obj.exists() else None
         if size_mb is not None and size_mb > max_file_mb and not include_large:
             row = {"file_id": record.file_id, "logical_path": record.logical_path, "reason": f"Skipped by --max-deep-file-mb ({max_file_mb})", "size_mb": size_mb}
@@ -65,19 +66,24 @@ def run_deep_scan(
         if not artifact.extracted:
             skipped_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "reason": artifact.skip_reason, "size_mb": size_mb})
             continue
-        extracted_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "extracted_path": str(dest), "sha256": artifact.output_sha256, "app_guess": guess_app_from_record_domain(record.domain)})
+        sidecar = sqlite_sidecar_type(dest)
+        if size_mb is None:
+            artifact.notes = "Pre-extraction source size was unknown; size policy could not be evaluated until after extraction."
+        extracted_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "extracted_path": str(dest), "sha256": artifact.output_sha256, "app_guess": guess_app_from_record_domain(record.domain), "artifact_type": sidecar or "candidate", "pre_extraction_size_mb": size_mb, "output_size": artifact.output_size, "notes": artifact.notes})
         try:
-            if is_sqlite_file(dest):
+            if sidecar:
+                skipped_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "reason": f"{sidecar}_sidecar_not_text_scanned", "size_mb": size_mb})
+            elif is_sqlite_file(dest):
                 sqlite_count += 1
                 sqlite_db_rows.append({"database": str(dest), "logical_path": record.logical_path, "sha256": artifact.output_sha256, "app_guess": guess_app_from_record_domain(record.domain)})
-                tables, _, hits = inspect_sqlite_keywords(dest, keywords, sqlite_row_limit, sample_dir, record, "deep_sqlite")
+                tables, _, hits = inspect_sqlite_keywords(dest, keywords, sqlite_row_limit, sample_dir, record, "deep_sqlite", context=export_context)
                 sqlite_table_rows.extend(tables)
                 rows = [h.__dict__ for h in hits]
                 sqlite_hits.extend(rows)
                 all_hits.extend(rows)
             else:
                 text_count += 1
-                hits = scan_text_keywords(dest, record, keywords, text_limit_mb, "deep_text")
+                hits = scan_text_keywords(dest, record, keywords, text_limit_mb, "deep_text", context=export_context)
                 rows = [h.__dict__ for h in hits]
                 text_hits.extend(rows)
                 all_hits.extend(rows)
@@ -106,6 +112,9 @@ def run_deep_scan(
         "text_files": text_count,
         "keyword_hits": len(all_hits),
         "keywords": keywords,
+        "sqlite_row_limit": sqlite_row_limit,
+        "sqlite_row_limit_note": "unlimited" if sqlite_row_limit <= 0 else str(sqlite_row_limit),
+        "export_context": export_context,
     }
     write_json(outdir / "deep_scan_summary.json", summary)
     write_table_html(outdir / "deep_scan_summary.html", "Deep Scan Summary", [summary])

@@ -67,7 +67,7 @@ def test_missing_sms_warns_not_crashes(tmp_path):
         "include_large_deep_files": False,
         "deep_scan_text_limit_mb": 1,
         "deep_scan_sqlite_row_limit": 10,
-        "deep_scan_export_context": False,
+        "deep_scan_export_context": 240,
         "write_timeline": False,
     })()
     result = run_forensic_triage(args)

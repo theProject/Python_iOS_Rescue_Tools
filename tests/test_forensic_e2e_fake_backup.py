@@ -70,8 +70,8 @@ def test_forensics_e2e_fake_mobilesync_backup(tmp_path):
             "max_deep_file_mb": 5,
             "include_large_deep_files": False,
             "deep_scan_text_limit_mb": 5,
-            "deep_scan_sqlite_row_limit": 100,
-            "deep_scan_export_context": False,
+            "deep_scan_sqlite_row_limit": 0,
+            "deep_scan_export_context": 240,
             "write_timeline": True,
         },
     )()
