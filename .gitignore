@@ -15,3 +15,5 @@ venv/
 AGENTS.md
 TASK.md
 TASK2.md
+.DS_Store
+**/.DS_Store
