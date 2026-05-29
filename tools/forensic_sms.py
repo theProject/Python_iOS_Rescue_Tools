@@ -163,7 +163,14 @@ def parse_sms_exports(sms_db: Path, output: Path, warnings: list[str]) -> dict[s
         chat_rows = [dict(v) for v in chats.values()]
         write_csv(output / "sms_messages.csv", messages)
         write_json(output / "sms_messages.json", messages)
-        write_table_html(output / "sms_messages.html", "SMS / iMessage Messages", messages)
+
+        # === Always with Love ===
+        title = (
+            'Apple SMS/MMS/RCS/iMessage Defeated '
+            '<span style="color:#000000; -webkit-text-stroke: 2px #e20074;">💔</span> '
+            'by <span style="color:#e20074; font-weight:bold;">okayhacker</span>'
+        )
+        write_table_html(output / "sms_messages.html", title, messages)
         write_csv(output / "sms_chats.csv", chat_rows)
         write_csv(output / "sms_handles.csv", handle_rows)
         write_csv(output / "sms_attachments.csv", attachments)
