@@ -204,23 +204,25 @@ def run_teams_triage(
             continue
         artifact = extractor.extract_record(record, dest, "teams_candidate")
         artifacts.append(artifact)
-        sidecar = sqlite_sidecar_type(dest)
+        actual_path = Path(artifact.output_path)
+        sidecar = sqlite_sidecar_type(actual_path)
         if artifact.extracted and size_mb is None:
-            artifact.notes = "Pre-extraction source size was unknown; size policy could not be evaluated until after extraction."
-        candidate_rows.append({"file_id": record.file_id, "domain": record.domain, "relative_path": record.relative_path, "logical_path": record.logical_path, "extracted_path": str(dest), "extracted": artifact.extracted, "skip_reason": artifact.skip_reason, "artifact_type": sidecar or "candidate", "pre_extraction_size_mb": size_mb, "output_size": artifact.output_size, "notes": artifact.notes})
+            size_note = "Pre-extraction source size was unknown; size policy could not be evaluated until after extraction."
+            artifact.notes = f"{artifact.notes} {size_note}".strip()
+        candidate_rows.append({"file_id": record.file_id, "domain": record.domain, "relative_path": record.relative_path, "logical_path": record.logical_path, "extracted_path": str(actual_path), "extracted": artifact.extracted, "skip_reason": artifact.skip_reason, "artifact_type": sidecar or "candidate", "pre_extraction_size_mb": size_mb, "output_size": artifact.output_size, "notes": artifact.notes})
         if not artifact.extracted:
             warnings.append(f"Could not extract Teams candidate {record.logical_path}: {artifact.skip_reason}")
             continue
         try:
             if sidecar:
                 continue
-            if is_sqlite_file(dest):
+            if is_sqlite_file(actual_path):
                 sqlite_db_count += 1
-                tables, _, hits = inspect_sqlite_keywords(dest, keywords, sample_limit, sample_dir, record, "teams_sqlite")
+                tables, _, hits = inspect_sqlite_keywords(actual_path, keywords, sample_limit, sample_dir, record, "teams_sqlite")
                 sqlite_tables.extend(tables)
                 sqlite_hits.extend(hits)
             elif keywords:
-                text_hits.extend(scan_text_keywords(dest, record, keywords, parser_note="teams_text"))
+                text_hits.extend(scan_text_keywords(actual_path, record, keywords, parser_note="teams_text"))
         except Exception as exc:
             warnings.append(f"Could not inspect Teams candidate {record.logical_path}: {exc}")
     write_csv(outdir / "teams_candidate_files.csv", candidate_rows)

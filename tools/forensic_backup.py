@@ -5,6 +5,7 @@ import csv
 import getpass
 import os
 import plistlib
+import re
 import shutil
 import sqlite3
 from dataclasses import asdict
@@ -118,8 +119,28 @@ class BackupExtractor:
                 return candidate
         return None
 
+    def _collision_safe_path(self, record: ManifestRecord, requested_path: Path, label: str) -> Path:
+        basename = requested_path.name or Path(record.relative_path).name or "artifact"
+        safe_basename = re.sub(r"[^A-Za-z0-9._-]+", "_", basename).strip("._") or "artifact"
+        prefix = record.file_id[:2] or "unknown"
+        return self.output / "_path_collisions" / label / prefix / f"{record.file_id}__{safe_basename}"
+
+    def _prepare_output_path(self, record: ManifestRecord, requested_path: Path, label: str) -> tuple[Path, str]:
+        note = ""
+        try:
+            requested_path.parent.mkdir(parents=True, exist_ok=True)
+            if requested_path.is_dir():
+                raise IsADirectoryError(requested_path)
+            return requested_path, note
+        except (FileExistsError, NotADirectoryError, IsADirectoryError):
+            fallback = self._collision_safe_path(record, requested_path, label)
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            note = "Preferred output path collided with an existing file/directory; artefact relocated to collision-safe path."
+            return fallback, note
+
     def extract_record(self, record: ManifestRecord, output_path: Path, label: str = "artifact") -> ExtractedArtifact:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        requested_path = output_path
+        output_path, collision_note = self._prepare_output_path(record, requested_path, label)
         source_obj = self.source_object_path(record.file_id)
         source_hash = sha256_file(source_obj) if source_obj and source_obj.exists() else None
         try:
@@ -143,6 +164,7 @@ class BackupExtractor:
                 output_size=output_path.stat().st_size,
                 encrypted=self.encrypted,
                 extracted=True,
+                notes=collision_note,
             )
         except Exception as exc:
             return ExtractedArtifact(
@@ -160,6 +182,7 @@ class BackupExtractor:
                 extracted=False,
                 skipped=True,
                 skip_reason=str(exc),
+                notes=collision_note,
             )
 
 

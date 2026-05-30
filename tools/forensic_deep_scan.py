@@ -66,24 +66,26 @@ def run_deep_scan(
         if not artifact.extracted:
             skipped_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "reason": artifact.skip_reason, "size_mb": size_mb})
             continue
-        sidecar = sqlite_sidecar_type(dest)
+        actual_path = Path(artifact.output_path)
+        sidecar = sqlite_sidecar_type(actual_path)
         if size_mb is None:
-            artifact.notes = "Pre-extraction source size was unknown; size policy could not be evaluated until after extraction."
-        extracted_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "extracted_path": str(dest), "sha256": artifact.output_sha256, "app_guess": guess_app_from_record_domain(record.domain), "artifact_type": sidecar or "candidate", "pre_extraction_size_mb": size_mb, "output_size": artifact.output_size, "notes": artifact.notes})
+            size_note = "Pre-extraction source size was unknown; size policy could not be evaluated until after extraction."
+            artifact.notes = f"{artifact.notes} {size_note}".strip()
+        extracted_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "extracted_path": str(actual_path), "sha256": artifact.output_sha256, "app_guess": guess_app_from_record_domain(record.domain), "artifact_type": sidecar or "candidate", "pre_extraction_size_mb": size_mb, "output_size": artifact.output_size, "notes": artifact.notes})
         try:
             if sidecar:
                 skipped_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "reason": f"{sidecar}_sidecar_not_text_scanned", "size_mb": size_mb})
-            elif is_sqlite_file(dest):
+            elif is_sqlite_file(actual_path):
                 sqlite_count += 1
-                sqlite_db_rows.append({"database": str(dest), "logical_path": record.logical_path, "sha256": artifact.output_sha256, "app_guess": guess_app_from_record_domain(record.domain)})
-                tables, _, hits = inspect_sqlite_keywords(dest, keywords, sqlite_row_limit, sample_dir, record, "deep_sqlite", context=export_context)
+                sqlite_db_rows.append({"database": str(actual_path), "logical_path": record.logical_path, "sha256": artifact.output_sha256, "app_guess": guess_app_from_record_domain(record.domain)})
+                tables, _, hits = inspect_sqlite_keywords(actual_path, keywords, sqlite_row_limit, sample_dir, record, "deep_sqlite", context=export_context)
                 sqlite_table_rows.extend(tables)
                 rows = [h.__dict__ for h in hits]
                 sqlite_hits.extend(rows)
                 all_hits.extend(rows)
             else:
                 text_count += 1
-                hits = scan_text_keywords(dest, record, keywords, text_limit_mb, "deep_text", context=export_context)
+                hits = scan_text_keywords(actual_path, record, keywords, text_limit_mb, "deep_text", context=export_context)
                 rows = [h.__dict__ for h in hits]
                 text_hits.extend(rows)
                 all_hits.extend(rows)

@@ -163,16 +163,7 @@ def parse_sms_exports(sms_db: Path, output: Path, warnings: list[str]) -> dict[s
         chat_rows = [dict(v) for v in chats.values()]
         write_csv(output / "sms_messages.csv", messages)
         write_json(output / "sms_messages.json", messages)
-
-        # === okayhacker wins ===
-        write_table_html(output / "sms_messages.html", "Apple iMessage History Decrypted", messages)
-
-        # === Quick & Dirty Signature Injection With Love from okayhacker ===
-        html_path = output / "sms_messages.html"
-        content = html_path.read_text(encoding="utf-8")
-        styled = 'Apple iMessage History Decrypted <span style="color:#000000; -webkit-text-stroke: 3px #05f2af;"> ⛓️‍💥 </span> by <span style="color:#e20074; font-weight:bold;">okayhacker</span>'
-        content = content.replace("<h1>Apple iMessage History Decrypted</h1>", f"<h1>{styled}</h1>")
-        html_path.write_text(content, encoding="utf-8")
+        write_table_html(output / "sms_messages.html", "SMS / iMessage Messages", messages)
         
         write_csv(output / "sms_chats.csv", chat_rows)
         write_csv(output / "sms_handles.csv", handle_rows)
