@@ -86,6 +86,8 @@ def test_forensics_e2e_fake_mobilesync_backup(tmp_path):
     deep_hits = output / "deep_scan" / "deep_keyword_hits.csv"
     assert deep_hits.exists()
     assert "Tesla" in deep_hits.read_text(encoding="utf-8")
+    assert (output / "review" / "high_signal_hits.csv").exists()
+    assert "Tesla" in (output / "review" / "keyword_summary.csv").read_text(encoding="utf-8")
 
 
 def test_deep_scan_relocates_file_directory_output_collision(tmp_path):

@@ -59,6 +59,13 @@ class DeepKeywordHit:
     offset: int | None = None
     snippet: str = ""
     parser_note: str = ""
+    clean_snippet: str = ""
+    raw_snippet_preview: str = ""
+    control_char_count: int = 0
+    printable_ratio: float = 1.0
+    binary_fragment: bool = False
+    confidence: str = "high"
+    evidence_class: str = ""
 
 
 @dataclass

@@ -15,6 +15,7 @@ h1,h2{margin:0 0 12px}.card{background:#09090b;border:1px solid #27272a;border-r
 table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid #27272a;padding:8px;text-align:left;vertical-align:top}
 th{background:#18181b}.keyword{color:#05f2af;font-weight:700}.warn{color:#fbbf24}.muted{color:#a1a1aa}.mag{color:#e20074}
 """
+MAX_HTML_BYTES = 25 * 1024 * 1024
 
 
 def utc_now_iso() -> str:
@@ -74,24 +75,62 @@ def write_table_html(path: Path, title: str, rows: Iterable[dict[str, Any]], int
     path.write_text("".join(parts), encoding="utf-8")
 
 
-def write_cards_html(path: Path, title: str, cards: Iterable[dict[str, Any]], text_field: str = "snippet") -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _cards_html(title: str, cards: list[dict[str, Any]], text_field: str) -> str:
+    display_field = text_field
+    if cards and any("clean_snippet" in card for card in cards):
+        display_field = "clean_snippet"
     parts = ["<!doctype html><meta charset='utf-8'>", f"<title>{html.escape(title)}</title>", f"<style>{CSS}</style>"]
     parts.append(f"<h1>{html.escape(title)}</h1>")
-    count = 0
     for card in cards:
-        count += 1
         parts.append("<div class='card'>")
         for key, value in to_plain(card).items():
+            if key == "snippet" and display_field == "clean_snippet":
+                continue
             safe = html.escape("" if value is None else str(value))
-            if key == text_field:
+            if key == display_field:
                 parts.append(f"<p>{safe}</p>")
             else:
                 parts.append(f"<div><span class='muted'>{html.escape(key)}:</span> {safe}</div>")
         parts.append("</div>")
-    if count == 0:
+    if not cards:
         parts.append("<div class='card muted'>No records.</div>")
-    path.write_text("".join(parts), encoding="utf-8")
+    return "".join(parts)
+
+
+def write_cards_html(path: Path, title: str, cards: Iterable[dict[str, Any]], text_field: str = "snippet") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = [to_plain(card) for card in cards]
+    html_text = _cards_html(title, data, text_field)
+    if len(html_text.encode("utf-8")) <= MAX_HTML_BYTES:
+        path.write_text(html_text, encoding="utf-8")
+        return
+
+    stem_dir = path.with_suffix("")
+    stem_dir.mkdir(parents=True, exist_ok=True)
+    part_paths: list[Path] = []
+    part: list[dict[str, Any]] = []
+    part_number = 1
+    for card in data:
+        trial = _cards_html(f"{title} Part {part_number:03d}", part + [card], text_field)
+        if part and len(trial.encode("utf-8")) > MAX_HTML_BYTES:
+            part_path = stem_dir / f"report_part_{part_number:03d}.html"
+            part_path.write_text(_cards_html(f"{title} Part {part_number:03d}", part, text_field), encoding="utf-8")
+            part_paths.append(part_path)
+            part_number += 1
+            part = [card]
+        else:
+            part.append(card)
+    if part:
+        part_path = stem_dir / f"report_part_{part_number:03d}.html"
+        part_path.write_text(_cards_html(f"{title} Part {part_number:03d}", part, text_field), encoding="utf-8")
+        part_paths.append(part_path)
+    index = ["<!doctype html><meta charset='utf-8'>", f"<title>{html.escape(title)}</title>", f"<style>{CSS}</style>", f"<h1>{html.escape(title)}</h1>"]
+    index.append("<div class='card'><p>Report split because the full HTML exceeded 25 MB.</p>")
+    for part_path in part_paths:
+        index.append(f"<div><a href='{html.escape(str(part_path.name))}'>{html.escape(part_path.name)}</a></div>")
+    index.append("</div>")
+    (stem_dir / "report_index.html").write_text("".join(index), encoding="utf-8")
+    path.write_text("".join(index), encoding="utf-8")
 
 
 def write_case_summary(path_json: Path, path_html: Path, summary: dict[str, Any]) -> None:

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import string
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 
 APPLE_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
@@ -15,6 +17,18 @@ SECRET_RE = re.compile(
     r"(?i)\b(access_token|refresh_token|id_token|authorization|bearer|cookie|password|secret|session|jwt|token)\b"
     r"(\s*[:=]\s*|[\"']\s*:\s*[\"']?)([^,\s\"';&}{]{8,})"
 )
+DIRECTORY_MODE = 0o040000
+FILE_TYPE_MASK = 0o170000
+CONTAINER_PATH_SUFFIXES = {
+    "Library/HTTPStorages",
+    "Library/WebKit/Databases",
+    "Library/WebKit/WebsiteData/IndexedDB",
+    "Library/WebKit/WebsiteData/LocalStorage",
+    "Library/Application Support",
+    "Library/Caches",
+    "WebKit",
+    "WebsiteData",
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -76,6 +90,71 @@ def decode_attributed_body(value: object) -> tuple[str, str]:
 
 def redact_secrets(text: str) -> str:
     return SECRET_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", text)
+
+
+def clean_control_text(text: str) -> str:
+    cleaned = "".join(ch if ch in "\t\n\r" or ch >= " " else " " for ch in text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def snippet_quality_fields(snippet: str, evidence_class: str) -> dict[str, object]:
+    raw = "" if snippet is None else str(snippet)
+    control_count = sum(1 for ch in raw if ord(ch) < 32 and ch not in "\t\n\r")
+    printable_chars = set(string.printable)
+    printable_count = sum(1 for ch in raw if ch in printable_chars or ord(ch) >= 0x80)
+    printable_ratio = printable_count / len(raw) if raw else 1.0
+    clean = redact_secrets(clean_control_text(raw))
+    raw_preview = redact_secrets(raw[:500].encode("unicode_escape", errors="backslashreplace").decode("ascii", errors="ignore"))
+    binary_fragment = control_count > 0 or printable_ratio < 0.85
+    confidence = "low" if printable_ratio < 0.65 else "medium" if binary_fragment else "high"
+    return {
+        "clean_snippet": clean,
+        "raw_snippet_preview": raw_preview,
+        "control_char_count": control_count,
+        "printable_ratio": round(printable_ratio, 3),
+        "binary_fragment": binary_fragment,
+        "confidence": confidence,
+        "evidence_class": evidence_class,
+    }
+
+
+def _metadata_mode(metadata: dict[str, Any]) -> int | None:
+    for key in ("Mode", "mode", "st_mode", "ProtectionClassMode"):
+        value = metadata.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value, 0)
+            except ValueError:
+                continue
+    return None
+
+
+def metadata_indicates_directory(metadata: dict[str, Any]) -> bool:
+    if not metadata:
+        return False
+    for key in ("file_type", "FileType", "type", "Type", "NSFileType"):
+        value = str(metadata.get(key, "")).lower()
+        if "directory" in value:
+            return True
+    mode = _metadata_mode(metadata)
+    return bool(mode is not None and (mode & FILE_TYPE_MASK) == DIRECTORY_MODE)
+
+
+def is_likely_directory_record(domain: str, relative_path: str, metadata: dict[str, Any] | None = None) -> bool:
+    if metadata_indicates_directory(metadata or {}):
+        return True
+    normalized = str(Path(relative_path).as_posix()).strip("/")
+    if not normalized:
+        return True
+    normalized_lower = normalized.lower()
+    for suffix in CONTAINER_PATH_SUFFIXES:
+        suffix_lower = suffix.lower()
+        if normalized_lower == suffix_lower or normalized_lower.endswith(f"/{suffix_lower}"):
+            return True
+    leaf = Path(normalized).name.lower()
+    return leaf in {"webkit", "websitedata"}
 
 
 def keyword_hits(text: str, keywords: list[str], context: int = 120) -> list[tuple[str, int, str]]:

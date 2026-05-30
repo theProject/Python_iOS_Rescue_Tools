@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from collections import Counter
 import getpass
 import os
 import plistlib
@@ -18,11 +19,14 @@ from tools.forensic_common import is_output_inside_source, open_sqlite_ro, safe_
 from tools.forensic_deep_scan import DEFAULT_DEEP_KEYWORDS, run_deep_scan
 from tools.forensic_models import ExtractedArtifact, ForensicError, ManifestRecord, TriageResult
 from tools.forensic_reports import utc_now_iso, write_case_summary, write_csv, write_json, write_table_html
+from tools.forensic_reports import write_cards_html
 from tools.forensic_sms import extract_sms_artifacts, parse_sms_exports
 from tools.forensic_teams import run_teams_triage
 
 
 TABLE_CANDIDATES = ("Files", "files", "file", "FILE")
+HIGH_SIGNAL_KEYWORDS = {"tesla", "adhd", "julio", "bikrom", "accommodation", "jake", "kelly"}
+NOISY_STANDALONE_KEYWORDS = {"monitor", "focus", "coding", "widescreen"}
 
 
 def add_forensic_parser(sub: argparse._SubParsersAction) -> None:
@@ -324,6 +328,49 @@ def plist_safe_json(path: Path) -> list[dict[str, Any]]:
         return []
 
 
+def _hit_sources(output: Path) -> list[Path]:
+    return [
+        output / "teams" / "teams_keyword_hits.json",
+        output / "teams" / "teams_text_keyword_hits.json",
+        output / "deep_scan" / "deep_keyword_hits.json",
+    ]
+
+
+def write_review_exports(output: Path) -> dict[str, int]:
+    hits: list[dict[str, Any]] = []
+    for path in _hit_sources(output):
+        hits.extend(plist_safe_json(path))
+    review_dir = output / "review"
+    high_signal: list[dict[str, Any]] = []
+    keyword_counts: Counter[str] = Counter()
+    app_counts: Counter[str] = Counter()
+    for hit in hits:
+        keyword = str(hit.get("keyword") or "")
+        keyword_lower = keyword.lower()
+        keyword_counts[keyword] += 1
+        app_key = str(hit.get("app_guess") or hit.get("domain") or "unknown")
+        app_counts[app_key] += 1
+        if keyword_lower in HIGH_SIGNAL_KEYWORDS:
+            row = dict(hit)
+            row["review_signal"] = "high"
+            high_signal.append(row)
+        elif keyword_lower in NOISY_STANDALONE_KEYWORDS:
+            row = dict(hit)
+            row["review_signal"] = "noisy_standalone"
+    keyword_rows = [{"keyword": key, "hits": count, "signal": "high" if key.lower() in HIGH_SIGNAL_KEYWORDS else "noisy_standalone" if key.lower() in NOISY_STANDALONE_KEYWORDS else "standard"} for key, count in keyword_counts.most_common()]
+    app_rows = [{"app_or_domain": key, "hits": count} for key, count in app_counts.most_common()]
+    write_csv(review_dir / "high_signal_hits.csv", high_signal)
+    write_json(review_dir / "high_signal_hits.json", high_signal)
+    write_cards_html(review_dir / "high_signal_hits.html", "High Signal Hits", high_signal)
+    write_csv(review_dir / "keyword_summary.csv", keyword_rows)
+    write_json(review_dir / "keyword_summary.json", keyword_rows)
+    write_table_html(review_dir / "keyword_summary.html", "Keyword Summary", keyword_rows)
+    write_csv(review_dir / "app_domain_summary.csv", app_rows)
+    write_json(review_dir / "app_domain_summary.json", app_rows)
+    write_table_html(review_dir / "app_domain_summary.html", "App / Domain Summary", app_rows)
+    return {"high_signal_hits": len(high_signal), "reviewed_hits": len(hits)}
+
+
 def run_forensic_triage(args: argparse.Namespace) -> TriageResult:
     source = Path(args.source).expanduser().resolve()
     output = Path(args.output).expanduser().resolve()
@@ -378,6 +425,7 @@ def run_forensic_triage(args: argparse.Namespace) -> TriageResult:
         log_lines.append("Ran deep app cache scan")
     if args.write_timeline:
         _write_timeline(output)
+    review_result = write_review_exports(output)
     _write_evidence_manifest(output, artifacts)
     log_lines.append("Wrote evidence manifest")
     write_json(output / "warnings.json", warnings)
@@ -400,6 +448,7 @@ def run_forensic_triage(args: argparse.Namespace) -> TriageResult:
         },
         "results": {
             "extracted_artifacts": sum(1 for a in artifacts if a.extracted),
+            "extracted_files": teams_result.get("extracted_files", 0) + deep_result.get("extracted_files", 0),
             "sms_messages_parsed": sms_count,
             "sms_attachments_extracted": sum(1 for a in artifacts if a.label == "sms_attachment" and a.extracted),
             "teams_candidate_files": teams_result.get("candidate_files", 0),
@@ -414,6 +463,9 @@ def run_forensic_triage(args: argparse.Namespace) -> TriageResult:
             "deep_scan_keyword_hits": deep_result.get("keyword_hits", 0),
             "deep_scan_sqlite_row_limit": deep_result.get("sqlite_row_limit", args.deep_scan_sqlite_row_limit),
             "deep_scan_export_context": deep_result.get("export_context", args.deep_scan_export_context),
+            "high_signal_hits": review_result.get("high_signal_hits", 0),
+            "directory_records_skipped": teams_result.get("directory_records_skipped", 0) + deep_result.get("directory_records_skipped", 0),
+            "extraction_failures": teams_result.get("extraction_failures", 0) + deep_result.get("extraction_failures", 0),
         },
         "warnings": warnings,
         "notes": [

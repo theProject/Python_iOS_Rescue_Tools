@@ -1,8 +1,10 @@
 import argparse
+import plistlib
 import sqlite3
 
+from tools.forensic_backup import BackupExtractor
 from tools.forensic_backup import add_forensic_parser
-from tools.forensic_deep_scan import DEFAULT_DEEP_KEYWORDS, is_deep_candidate
+from tools.forensic_deep_scan import DEFAULT_DEEP_KEYWORDS, is_deep_candidate, run_deep_scan
 from tools.forensic_models import ManifestRecord
 from tools.forensic_teams import inspect_sqlite_keywords, scan_text_keywords
 
@@ -73,3 +75,40 @@ def test_deep_scan_hit_snippets_respect_configured_context(tmp_path):
     record = ManifestRecord("id", "AppDomain-com.example.app", "Library/Logs/state.log")
     hits = scan_text_keywords(path, record, ["Tesla"], context=2)
     assert hits[0].snippet == "AATeslaBB"
+
+
+def test_deep_scan_skips_outlook_httpstorages_directory_without_warning(tmp_path):
+    backup = tmp_path / "BACKUP_UUID"
+    backup.mkdir()
+    with (backup / "Manifest.plist").open("wb") as f:
+        plistlib.dump({"IsEncrypted": False}, f)
+    record = ManifestRecord("id", "AppDomain-com.microsoft.Office.Outlook", "Library/HTTPStorages")
+    extractor = BackupExtractor(backup, tmp_path / "case", None)
+    warnings: list[str] = []
+
+    result = run_deep_scan([record], extractor, tmp_path / "case", ["Tesla"], 5, False, 5, 0, 120, warnings)
+
+    assert result["directory_records_skipped"] == 1
+    assert result["extraction_failures"] == 0
+    assert warnings == []
+    skipped = (tmp_path / "case" / "deep_scan" / "skipped_files.csv").read_text(encoding="utf-8")
+    assert "directory_record_not_extractable" in skipped
+
+
+def test_deep_scan_extensionless_candidate_still_extracts_and_scans(tmp_path):
+    backup = tmp_path / "BACKUP_UUID"
+    backup.mkdir()
+    (backup / "aa").mkdir()
+    with (backup / "Manifest.plist").open("wb") as f:
+        plistlib.dump({"IsEncrypted": False}, f)
+    (backup / "aa" / "aaaaaaaa").write_text("Tesla in extensionless cache", encoding="utf-8")
+    record = ManifestRecord("aaaaaaaa", "AppDomain-com.example.app", "Library/Caches/user")
+    extractor = BackupExtractor(backup, tmp_path / "case", None)
+    warnings: list[str] = []
+
+    result = run_deep_scan([record], extractor, tmp_path / "case", ["Tesla"], 5, False, 5, 0, 120, warnings)
+
+    assert result["extracted_files"] == 1
+    assert result["directory_records_skipped"] == 0
+    assert result["keyword_hits"] == 1
+    assert warnings == []

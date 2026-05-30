@@ -10,12 +10,14 @@ from typing import Any
 from tools.forensic_common import (
     file_size_mb,
     guess_app_from_record_domain,
+    is_likely_directory_record,
     is_sqlite_file,
     keyword_hits,
     open_sqlite_ro,
     redact_secrets,
     safe_output_path,
     sha256_file,
+    snippet_quality_fields,
 )
 from tools.forensic_models import DeepKeywordHit, ExtractedArtifact, ManifestRecord
 from tools.forensic_reports import write_cards_html, write_csv, write_json, write_table_html
@@ -101,6 +103,7 @@ def inspect_sqlite_keywords(
                         if value is None:
                             continue
                         for keyword, offset, snippet in keyword_hits(str(value), keywords, context=context):
+                            quality = snippet_quality_fields(snippet, "clean_sqlite_row")
                             hits.append(
                                 DeepKeywordHit(
                                     keyword=keyword,
@@ -119,6 +122,7 @@ def inspect_sqlite_keywords(
                                     offset=offset,
                                     snippet=redact_secrets(snippet),
                                     parser_note=parser_note,
+                                    **quality,
                                 )
                             )
                 except sqlite3.Error:
@@ -153,6 +157,7 @@ def scan_text_keywords(path: Path, record: ManifestRecord, keywords: list[str], 
     hits: list[DeepKeywordHit] = []
     digest = sha256_file(path)
     for keyword, offset, snippet in keyword_hits(text, keywords, context=context):
+        quality = snippet_quality_fields(snippet, "binary_text_fragment" if path.suffix.lower() in {".ldb", ".sst", ".realm"} else "raw_text")
         hits.append(
             DeepKeywordHit(
                 keyword=keyword,
@@ -167,6 +172,7 @@ def scan_text_keywords(path: Path, record: ManifestRecord, keywords: list[str], 
                 offset=offset,
                 snippet=redact_secrets(snippet),
                 parser_note=parser_note,
+                **quality,
             )
         )
     return hits
@@ -194,8 +200,16 @@ def run_teams_triage(
     sqlite_hits: list[DeepKeywordHit] = []
     text_hits: list[DeepKeywordHit] = []
     sqlite_db_count = 0
+    directory_skipped = 0
+    extraction_failures = 0
+    extracted_files = 0
     for record in candidates:
         dest = safe_output_path(output / "extracted_files", record.domain, record.relative_path)
+        if is_likely_directory_record(record.domain, record.relative_path, record.metadata):
+            directory_skipped += 1
+            candidate_rows.append({"file_id": record.file_id, "domain": record.domain, "relative_path": record.relative_path, "logical_path": record.logical_path, "extracted_path": str(dest), "extracted": False, "skip_reason": "directory_record_not_extractable", "artifact_type": "directory_record", "pre_extraction_size_mb": None, "output_size": 0, "notes": ""})
+            artifacts.append(ExtractedArtifact("teams_candidate", record.file_id, record.domain, record.relative_path, record.logical_path, None, str(dest), None, None, 0, extractor.is_encrypted(), False, True, "directory_record_not_extractable"))
+            continue
         source_obj = extractor.source_object_path(record.file_id)
         size_mb = file_size_mb(source_obj) if source_obj and source_obj.exists() else None
         if size_mb is not None and size_mb > max_file_mb and not include_large:
@@ -211,8 +225,10 @@ def run_teams_triage(
             artifact.notes = f"{artifact.notes} {size_note}".strip()
         candidate_rows.append({"file_id": record.file_id, "domain": record.domain, "relative_path": record.relative_path, "logical_path": record.logical_path, "extracted_path": str(actual_path), "extracted": artifact.extracted, "skip_reason": artifact.skip_reason, "artifact_type": sidecar or "candidate", "pre_extraction_size_mb": size_mb, "output_size": artifact.output_size, "notes": artifact.notes})
         if not artifact.extracted:
+            extraction_failures += 1
             warnings.append(f"Could not extract Teams candidate {record.logical_path}: {artifact.skip_reason}")
             continue
+        extracted_files += 1
         try:
             if sidecar:
                 continue
@@ -242,5 +258,8 @@ def run_teams_triage(
         "sqlite_databases": sqlite_db_count,
         "keyword_hits": len(sqlite_hits),
         "text_hits": len(text_hits),
+        "directory_records_skipped": directory_skipped,
+        "extraction_failures": extraction_failures,
+        "extracted_files": extracted_files,
         "artifacts": artifacts,
     }

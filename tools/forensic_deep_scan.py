@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from tools.forensic_common import file_size_mb, guess_app_from_record_domain, is_sqlite_file, safe_output_path, sha256_file
+from tools.forensic_common import file_size_mb, guess_app_from_record_domain, is_likely_directory_record, is_sqlite_file, safe_output_path, sha256_file
 from tools.forensic_models import ExtractedArtifact, ManifestRecord
 from tools.forensic_reports import write_cards_html, write_csv, write_json, write_table_html
 from tools.forensic_teams import inspect_sqlite_keywords, scan_text_keywords, sqlite_sidecar_type
@@ -51,9 +51,16 @@ def run_deep_scan(
     text_hits: list[dict[str, Any]] = []
     sqlite_count = 0
     text_count = 0
+    directory_skipped = 0
+    extraction_failures = 0
     for record in candidates:
         candidate_rows.append({"file_id": record.file_id, "domain": record.domain, "relative_path": record.relative_path, "logical_path": record.logical_path, "app_guess": guess_app_from_record_domain(record.domain)})
         dest = safe_output_path(extracted_dir, record.domain, record.relative_path)
+        if is_likely_directory_record(record.domain, record.relative_path, record.metadata):
+            directory_skipped += 1
+            skipped_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "reason": "directory_record_not_extractable", "size_mb": None})
+            artifacts.append(ExtractedArtifact("deep_scan", record.file_id, record.domain, record.relative_path, record.logical_path, None, str(dest), None, None, 0, extractor.is_encrypted(), False, True, "directory_record_not_extractable"))
+            continue
         source_obj = extractor.source_object_path(record.file_id)
         size_mb = file_size_mb(source_obj) if source_obj and source_obj.exists() else None
         if size_mb is not None and size_mb > max_file_mb and not include_large:
@@ -64,6 +71,7 @@ def run_deep_scan(
         artifact = extractor.extract_record(record, dest, "deep_scan")
         artifacts.append(artifact)
         if not artifact.extracted:
+            extraction_failures += 1
             skipped_rows.append({"file_id": record.file_id, "logical_path": record.logical_path, "reason": artifact.skip_reason, "size_mb": size_mb})
             continue
         actual_path = Path(artifact.output_path)
@@ -113,6 +121,8 @@ def run_deep_scan(
         "sqlite_databases": sqlite_count,
         "text_files": text_count,
         "keyword_hits": len(all_hits),
+        "directory_records_skipped": directory_skipped,
+        "extraction_failures": extraction_failures,
         "keywords": keywords,
         "sqlite_row_limit": sqlite_row_limit,
         "sqlite_row_limit_note": "unlimited" if sqlite_row_limit <= 0 else str(sqlite_row_limit),
